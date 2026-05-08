@@ -3,6 +3,7 @@ from aiokafka import AIOKafkaProducer, AIOKafkaConsumer
 from contextlib import asynccontextmanager
 from typing import List
 from models import Product
+from datetime import datetime, timezone
 import asyncio, json
 
 producer = AIOKafkaProducer(bootstrap_servers='kafka:9092')
@@ -32,18 +33,56 @@ products_db = {
     2: Product(id=2, name="Mouse", price=25.0, quantity=50)
 }
 
+def current_timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+async def publish_product_not_found_event(order: dict):
+    event = {
+        "order_id": order["id"],
+        "product_id": order["product_id"],
+        "timestamp": current_timestamp(),
+        "error_reason": "ne postoji u katalogu"
+    }
+
+    await producer.send_and_wait(
+        "product_not_found_events",
+        json.dumps(event).encode("utf-8")
+    )
+
+async def publish_out_of_stock_event(order: dict):
+    event = {
+        "order_id": order["id"],
+        "product_id": order["product_id"],
+        "timestamp": current_timestamp(),
+        "error_reason": "Nedovoljna količina na stanju"
+    }
+
+    await producer.send_and_wait(
+        "out_of_stock_events",
+        json.dumps(event).encode("utf-8")
+    )
+
 async def consume(consumer: AIOKafkaConsumer):
     try:
         async for msg in consumer:
             order = json.loads(msg.value.decode('utf-8'))
             product = products_db.get(order['product_id'])
             
-            if product and product.quantity >= order['quantity']:
-                product.quantity -= order['quantity']
-                await producer.send_and_wait("order-confirmed", json.dumps({
-                    "order_id": order['id'],
-                    "product_id": product.id
-                }).encode('utf-8'))
+            if not product:
+                await publish_product_not_found_event(order)
+                continue
+
+            if product.quantity < order['quantity']:
+                await publish_out_of_stock_event(order)
+                continue
+
+            product.quantity -= order['quantity']
+
+            await producer.send_and_wait("order-confirmed", json.dumps({
+                "order_id": order['id'],
+                "product_id": product.id
+            }).encode('utf-8'))
+
     except asyncio.CancelledError:
         pass
 
